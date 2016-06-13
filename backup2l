@@ -151,8 +151,21 @@ readable_bytes_sum ()
   '
 }
 
+json_string_array ()
+{
+  sed 's/"/\\"/g' | awk '
+    BEGIN { print "[" }
+    { printf("%s\"%s\"%s", (NR > 1) ? "," : "", $0, ORS) }
+    END   { print "]"  }
+  '
+}
 
 
+json_safe_string ()
+{
+  # aws - see http://stackoverflow.com/questions/1251999/how-can-i-replace-a-newline-n-using-sed
+  sed 's/"/\\"/g' | awk 1 ORS='\\n'
+}
 
 
 ##################################################
@@ -577,15 +590,13 @@ show_summary ()
 {
     require_tools $COMMON_TOOLS
 
-    echo "Summary"
-    echo "======="
-    echo
+    echo '{';
     cd $BACKUP_DIR
     if [[ `echo $VOLNAME.*.list.gz` == "" ]]; then
-        echo "No backup archives present."
+        echo '"error": "No backup archives present.",'
     else
-        echo "Backup       Date       Time  |  Size   | Skipped  Files+D |  New  Obs. | Err."
-        echo "------------------------------------------------------------------------------"
+        echo '"backups":['
+        comma=" "
         for f in `ls $VOLNAME.*.list.gz` ; do
             p=${f%%.list.gz}
             size="`du -sbL $p.* | readable_bytes_sum $SIZE_UNITS`"
@@ -594,13 +605,17 @@ show_summary ()
             new_files=$( gunzip -c $p.new.gz | wc -l )
             obsolete=$( gunzip -c $p.obsolete.gz | wc -l )
             errors=$( gunzip -c $p.error.gz | grep -a '<' | wc -l )
-            printf "%-12s %s %s |%8s |%8i %8i |%5i %5i |%5i\n" \
-                   $p $(date -r $p.list.gz +"%Y-%m-%d %H:%M") "$size" \
+            printf '%s{"backup": "%s", "datetime": "%s %s", "size": "%s", "skippedFiles": %i, "totalFiles": %i, "newFiles": %i, "obsoleteFiles": %i, "errors": %i}\n' \
+                   "$comma" $p $(date -r $p.list.gz +"%Y-%m-%d %H:%M") "$size" \
                    $skipped $total $new_files $obsolete $errors
+
+            comma=","
         done
+        echo "],"
     fi
-    echo
-    df -h $BACKUP_DIR
+    echo -n '"diskUsage": "'
+    df -h $BACKUP_DIR | json_safe_string
+    echo '"}'
 }
 
 
@@ -652,13 +667,15 @@ prepare_backup ()
     # Output: $LEVEL, $BASE_BID, $NEW_BID
     #         $TMP.list $TMP.skipped $TMP.new $TMP.obsolete $TMP.files
 
+    echo -n '{ "summary": "'
     # Determine level, base BID and new BID
     compute_level_and_bids $2
     if [ "$LEVEL" != "0" ]; then
-        echo "$1 differential level-$LEVEL backup <$VOLNAME.$NEW_BID> based on <$VOLNAME.$BASE_BID>..."
+        echo "$1 differential level-$LEVEL backup <$VOLNAME.$NEW_BID> based on <$VOLNAME.$BASE_BID>..." | json_safe_string
     else
-        echo "$1 full backup <$VOLNAME.$NEW_BID>..."
+        echo "$1 full backup <$VOLNAME.$NEW_BID>..." | json_safe_string
     fi
+    echo '",'
 
     # Determine main list & which files are new or obsolete...
     set -f  # pathname expansion off as it may destroy $SKIPCOND
@@ -702,13 +719,25 @@ prepare_backup ()
     eval "$FILTER_NAME" < $TMP.new | grep -av "/$" > $TMP.files   # extract real files
 
     # Print statistics...
-    echo " " `wc -l < $TMP.files` / `grep -av '/$' $TMP.list | wc -l` "file(s)," \
-        `grep -a '/$' $TMP.new | wc -l` / `grep -a '/$' $TMP.list | wc -l` "dir(s)," \
-        `grep -av '/$' $TMP.new | readable_bytes_sum`"B /" \
-        `grep -av '/$' $TMP.list | readable_bytes_sum`"B (uncompressed)"
-    echo "  skipping:" `grep -av '/$' $TMP.skipped | wc -l` "file(s)," \
-        `grep -a '/$' $TMP.skipped | wc -l` "dir(s)," \
-        `grep -av '/$' $TMP.skipped | readable_bytes_sum`"B (uncompressed)"
+
+    printf '"newFiles": %d, "totalFiles": %d, "newDirs": %d, "totalDirs": %d, "newSize": "%s", "totalSize": "%s", "skippedFiles": %d, "skippedDirs": %d, "skippedSize": "%s"}' \
+      `wc -l < $TMP.files` \
+      `grep -av '/$' $TMP.list | wc -l` \
+      `grep -a '/$' $TMP.new | wc -l` \
+      `grep -a '/$' $TMP.list | wc -l` \
+      "`grep -av '/$' $TMP.new | readable_bytes_sum`B" \
+      "`grep -av '/$' $TMP.list | readable_bytes_sum`B (uncompressed)" \
+      `grep -av '/$' $TMP.skipped | wc -l` \
+      `grep -a '/$' $TMP.skipped | wc -l` \
+      "`grep -av '/$' $TMP.skipped | readable_bytes_sum`B (uncompressed)"
+#
+#     echo " " `wc -l < $TMP.files` / `grep -av '/$' $TMP.list | wc -l` "file(s)," \
+#         `grep -a '/$' $TMP.new | wc -l` / `grep -a '/$' $TMP.list | wc -l` "dir(s)," \
+#         `grep -av '/$' $TMP.new | readable_bytes_sum`"B /" \
+#         `grep -av '/$' $TMP.list | readable_bytes_sum`"B (uncompressed)"
+#     echo "  skipping:" `grep -av '/$' $TMP.skipped | wc -l` "file(s)," \
+#         `grep -a '/$' $TMP.skipped | wc -l` "dir(s)," \
+#         `grep -av '/$' $TMP.skipped | readable_bytes_sum`"B (uncompressed)"
 }
 
 
@@ -857,17 +886,19 @@ show_availability ()
     fi
 
     echo "Listing available files..." 1>&2
-    for F in $VOLNAME.*.list.gz; do
-        BID=`get_bid_of_name $F`
-        FBID=$BID
-        while [[ ${#FBID} -lt 5 ]]; do
-            FBID=$FBID" "
-        done
-        for X in $MASK; do
-            gunzip -c $VOLNAME.$BID.obsolete.gz | grep -a "$X" | sed "s/^/$VOLNAME.$FBID - /"
-            gunzip -c $VOLNAME.$BID.new.gz | grep -a "$X" | sed "s/^/$VOLNAME.$FBID + /"
-        done
-    done
+    (
+      for F in $VOLNAME.*.list.gz; do
+          BID=`get_bid_of_name $F`
+          FBID=$BID
+          while [[ ${#FBID} -lt 5 ]]; do
+              FBID=$FBID" "
+          done
+          for X in $MASK; do
+              gunzip -c $VOLNAME.$BID.obsolete.gz | grep -a "$X" | sed "s/^/$VOLNAME.$FBID - /"
+              gunzip -c $VOLNAME.$BID.new.gz | grep -a "$X" | sed "s/^/$VOLNAME.$FBID + /"
+          done
+      done
+    ) | json_string_array
     cd /
     umount_dev 1>&2
 }
@@ -1237,7 +1268,7 @@ EOT
 
 banner ()
 {
-    echo backup2l v$VER by Gundolf Kiefer
+    echo "backup2l v$VER by Gundolf Kiefer"
     echo
 }
 
@@ -1356,15 +1387,15 @@ case $1 in
         usage
         ;;
     -e | --estimate)
-        banner
+        banner 1>&2
         show_backup_estimates "$2"
         ;;
     -b | --backup)
-        banner
+        banner 1>&2
         do_backup "$2"
         ;;
     -s | --get-summary)
-        banner
+        banner 1>&2
         mount_dev
         show_summary
         ;;
@@ -1379,27 +1410,27 @@ case $1 in
         show_location $BID "$@"
         ;;
     -r | --restore)
-        banner
+        banner 1>&2
         shift
         do_restore $BID "$@"
         ;;
     -p | --purge)
-        banner
+        banner 1>&2
         shift
         do_purge "$@"
         ;;
     -v | --verify)
-        banner
+        banner 1>&2
         shift
         do_check "$@"
         ;;
     -m | --make-check)
-        banner
+        banner 1>&2
         shift
         do_create_check "$@"
         ;;
     -x | --extract)
-        banner
+        banner 1>&2
         shift
         if [[ "$3" == "" ]]; then
             usage
