@@ -26,7 +26,7 @@
 ##################################################
 # Set global variables
 
-VER=1.6-pre2
+VER=1.6-pre2-ignore-perms
 
 
 # The following variable defines the commonly required tools. Additional tools
@@ -1008,9 +1008,7 @@ do_restore ()
         DIRS=`wc -l < $BACKUP_DIR/$TMP.dirs`
         if [ $DIRS -gt 0 ]; then
             echo "Restoring" $DIRS "directories..."
-            eval "$FILTER_NAME" < $BACKUP_DIR/$TMP.dirs | sed 's#^/\(.*\)$#"\1"#' | xargs -l1 mkdir -p
-            eval "$FILTER_CHMOD" < $BACKUP_DIR/$TMP.dirs | xargs -l1 chmod
-            eval "$FILTER_CHOWN" < $BACKUP_DIR/$TMP.dirs | xargs -l1 chown
+            RESTORE_DIRS $BACKUP_DIR/$TMP.dirs
         fi
 
         # process all archives...
@@ -1034,7 +1032,13 @@ do_restore ()
     rm -f $BACKUP_DIR/$TMP.*
 }
 
-
+RESTORE_DIRS () 
+{
+    # Arguments: $1 = $TMP.dirs
+    eval "$FILTER_NAME"  < $1 | sed 's#^/\(.*\)$#"\1"#' | xargs -l1 mkdir -p
+    eval "$FILTER_CHMOD" < $1 | xargs -l1 chmod
+    eval "$FILTER_CHOWN" < $1 | xargs -l1 chown
+}
 
 ##################################################
 # External archiving
